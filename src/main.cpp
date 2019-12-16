@@ -1,5 +1,4 @@
 #include <Arduino.h>
-#include "Debouncer.hpp"
 #include "RingBuffer.hpp"
 
 constexpr bool SERIAL_DEBUG = false;
@@ -266,34 +265,30 @@ State scanKeysUntilStateChange()
     auto state = readState();
 
     static bool previousKeyStates[NUM_KEYS] = {};
-    Debouncer keyStates[NUM_KEYS];
-
-    for (int i = 0; i < NUM_KEYS; ++i)
-        keyStates[i].init(previousKeyStates[i]);
 
     for (; state == State::Idle; state = readState())
     {
         for (int i = 0; i < NUM_KEYS; ++i)
         {
-            bool noisyPressed = readPin(KEYS[i].pin) == LOW;
-            auto pressed = keyStates[i].push(noisyPressed);
-            switch (pressed)
+            bool prev = previousKeyStates[i];
+            bool cur = readPin(KEYS[i].pin) == LOW;
+            if (prev != cur)
             {
-            case Debouncer::Result::Pressed:
-                sendByte(KEYS[i].scanCode);
-                previousKeyStates[i] = true;
-                log(KEYS[i].name, 1);
-                return state;
-
-            case Debouncer::Result::Released:
-                sendByte(0xF0);
-                sendByte(KEYS[i].scanCode);
-                previousKeyStates[i] = false;
-                log(KEYS[i].name, 0);
-                return state;
-
-            case Debouncer::Result::None:
-                break;
+                if (cur)
+                {
+                    sendByte(KEYS[i].scanCode);
+                    previousKeyStates[i] = true;
+                    log(KEYS[i].name, 1);
+                    return state;
+                }
+                else
+                {
+                    sendByte(0xF0);
+                    sendByte(KEYS[i].scanCode);
+                    previousKeyStates[i] = false;
+                    log(KEYS[i].name, 0);
+                    return state;
+                }
             }
         }
     }
