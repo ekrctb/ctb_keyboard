@@ -1,7 +1,17 @@
 #include <Arduino.h>
 #include "RingBuffer.hpp"
 
-constexpr bool SERIAL_DEBUG = false;
+// TODO: measure one key scan
+
+enum class LogLevel
+{
+    NONE = 0,
+    NOTICE = 1,
+    INFO = 2,
+    DEBUG = 3,
+};
+
+constexpr LogLevel LOG_LEVEL = LogLevel::INFO;
 
 struct KeyConfig
 {
@@ -10,10 +20,10 @@ struct KeyConfig
     uint8_t scanCode;
 };
 
-// The host has to do an I/O during this delay and failing this timeout implies a communication failure
-constexpr uint8_t DELAY_PRIMARY = 30;
-// The host is expected to be consuming very cycles during this delay
-constexpr uint8_t DELAY_SECONDARY = 10;
+constexpr uint8_t DELAY_SEND_CLOCK_LOW_START = 30;
+constexpr uint8_t DELAY_SEND_CLOCK_LOW = 15;
+
+constexpr uint8_t DELAY_RECEIVE = 30;
 
 constexpr uint8_t PIN_DATA = 12, PIN_CLOCK = 13;
 constexpr KeyConfig KEYS[] = {
@@ -94,21 +104,26 @@ void logInner(const char *message, uint8_t byte)
     });
 }
 
-inline void log(const char *message, uint8_t byte = 0)
+inline void logDebug(const char *message, uint8_t byte = 0)
 {
-    if (SERIAL_DEBUG)
+    if (LOG_LEVEL >= LogLevel::DEBUG)
+        logInner(message, byte);
+}
+
+inline void logInfo(const char *message, uint8_t byte = 0)
+{
+    if (LOG_LEVEL >= LogLevel::INFO)
+        logInner(message, byte);
+}
+
+inline void logNotice(const char *message, uint8_t byte = 0)
+{
+    if (LOG_LEVEL >= LogLevel::NOTICE)
         logInner(message, byte);
 }
 
 void sendByte(uint8_t code)
 {
-    uint8_t bits[11];
-    bits[0] = LOW;
-    for (int i = 0; i < 8; ++i)
-        bits[1 + i] = (code >> i & 1) != 0 ? HIGH : LOW;
-    bits[9] = oddParity(code) ? HIGH : LOW;
-    bits[10] = HIGH;
-
     while (readState() != State::Idle)
         ;
 
@@ -124,32 +139,42 @@ void sendByte(uint8_t code)
         delayMicroseconds(10000);
         break;
     default:
-        delayMicroseconds(DELAY_PRIMARY);
         break;
     }
 
-    for (int i = 0; i < 11; ++i)
+    // Send the start bit
+    outputLow(PIN_DATA);
+    outputLow(PIN_CLOCK);
+
+    // ~ 20us for this computation is added for the delay before
+    uint8_t bits[10];
+    for (int i = 0; i < 8; ++i)
+        bits[i] = (code >> i & 1) != 0 ? HIGH : LOW;
+    bits[8] = oddParity(code) ? HIGH : LOW;
+    bits[9] = HIGH;
+
+    delayMicroseconds(DELAY_SEND_CLOCK_LOW_START);
+
+    for (int i = 0; i < 10; ++i)
     {
+        outputHigh(PIN_CLOCK);
+
         if (bits[i] == HIGH)
             outputHigh(PIN_DATA);
         else
             outputLow(PIN_DATA);
-        delayMicroseconds(DELAY_SECONDARY);
 
         outputLow(PIN_CLOCK);
-        delayMicroseconds(DELAY_PRIMARY);
-
-        outputHigh(PIN_CLOCK);
-        delayMicroseconds(DELAY_SECONDARY);
+        delayMicroseconds(DELAY_SEND_CLOCK_LOW);
     }
 
     pinMode(PIN_CLOCK, INPUT_PULLUP);
     pinMode(PIN_DATA, INPUT_PULLUP);
 
-    log("Sent byte", code);
+    logDebug("Sent byte", code);
 }
 
-uint8_t receiveByte()
+bool receiveByte(uint8_t *outCommand)
 {
     while (readState() != State::CanReceive)
         ;
@@ -159,11 +184,11 @@ uint8_t receiveByte()
     for (int i = 0; i < 10; ++i)
     {
         outputLow(PIN_CLOCK);
-        delayMicroseconds(DELAY_PRIMARY);
+        delayMicroseconds(DELAY_RECEIVE);
 
         bits[i] = readPin(PIN_DATA);
         outputHigh(PIN_CLOCK);
-        delayMicroseconds(DELAY_PRIMARY);
+        delayMicroseconds(DELAY_RECEIVE);
     }
 
     uint8_t command = 0;
@@ -174,29 +199,37 @@ uint8_t receiveByte()
 
     pinMode(PIN_DATA, OUTPUT);
     outputLow(PIN_DATA);
-    delayMicroseconds(DELAY_SECONDARY);
+    delayMicroseconds(DELAY_RECEIVE);
 
     outputLow(PIN_CLOCK);
-    delayMicroseconds(DELAY_PRIMARY);
+    delayMicroseconds(DELAY_RECEIVE);
 
     outputHigh(PIN_CLOCK);
-    delayMicroseconds(DELAY_SECONDARY);
+    delayMicroseconds(DELAY_RECEIVE);
 
     outputHigh(PIN_DATA);
-    delayMicroseconds(DELAY_PRIMARY);
+    delayMicroseconds(DELAY_RECEIVE);
 
     pinMode(PIN_DATA, INPUT_PULLUP);
     pinMode(PIN_CLOCK, INPUT_PULLUP);
 
+    *outCommand = command;
+
     if (bits[8] != (oddParity(command) ? HIGH : LOW))
-        log("parity error", command);
+    {
+        logInfo("Parity error", command);
+        return false;
+    }
 
     if (bits[9] != HIGH)
-        log("stop bit error", command);
+    {
+        logInfo("Stop bit error", command);
+        return false;
+    }
 
-    log("Received byte", command);
+    logDebug("Received byte", command);
 
-    return command;
+    return true;
 }
 
 void executeHostCommand(uint8_t command)
@@ -207,7 +240,7 @@ void executeHostCommand(uint8_t command)
     case 0xff:
         sendByte(ACK);
         sendByte(BAT_SUCCESS);
-        log("Reset completed");
+        logInfo("Reset completed");
         break;
 
     // 0xFE (Resend) - Resend the last sent byte
@@ -231,8 +264,10 @@ void executeHostCommand(uint8_t command)
     case 0xf3:
     {
         sendByte(ACK);
-        uint8_t typematic = receiveByte();
-        log("Typematic", typematic);
+        uint8_t typematic;
+        if (!receiveByte(&typematic))
+            break;
+        logInfo("Typematic", typematic);
         // Currently ignored
         // Several typematic commands are sent at the startup probably to determine which typematic setting is supported.
         break;
@@ -249,13 +284,15 @@ void executeHostCommand(uint8_t command)
     case 0xed:
     {
         sendByte(ACK);
-        uint8_t led = receiveByte();
-        log("LED", led);
+        uint8_t led;
+        if (!receiveByte(&led))
+            break;
+        logInfo("LED", led);
         break;
     }
 
     default:
-        log("Unknown command", command);
+        logNotice("Unknown command", command);
         break;
     }
 }
@@ -268,6 +305,7 @@ State scanKeysUntilStateChange()
 
     for (; state == State::Idle; state = readState())
     {
+        // ~ 16us for 3-key scan
         for (int i = 0; i < NUM_KEYS; ++i)
         {
             bool prev = previousKeyStates[i];
@@ -278,7 +316,7 @@ State scanKeysUntilStateChange()
                 {
                     sendByte(KEYS[i].scanCode);
                     previousKeyStates[i] = true;
-                    log(KEYS[i].name, 1);
+                    logDebug(KEYS[i].name, 1);
                     return state;
                 }
                 else
@@ -286,7 +324,7 @@ State scanKeysUntilStateChange()
                     sendByte(0xF0);
                     sendByte(KEYS[i].scanCode);
                     previousKeyStates[i] = false;
-                    log(KEYS[i].name, 0);
+                    logDebug(KEYS[i].name, 0);
                     return state;
                 }
             }
@@ -298,7 +336,7 @@ State scanKeysUntilStateChange()
 
 void setup()
 {
-    if (SERIAL_DEBUG)
+    if (LOG_LEVEL > LogLevel::NONE)
     {
         Serial.begin(9600);
         Serial.println("hello");
@@ -317,8 +355,9 @@ void loop()
 
     if (state == State::CanReceive)
     {
-        auto command = receiveByte();
-        executeHostCommand(command);
+        uint8_t command;
+        if (receiveByte(&command))
+            executeHostCommand(command);
     }
 
     while (!logEntries.empty())
