@@ -70,7 +70,7 @@ inline void outputLow(uint8_t pin)
     *portOutputRegister(digitalPinToPort(pin)) &= ~digitalPinToBitMask(pin);
 }
 
-State readState()
+inline State readState()
 {
     auto data = readPin(PIN_DATA);
     auto clock = readPin(PIN_CLOCK);
@@ -124,9 +124,11 @@ inline void logNotice(const char *message, uint8_t byte = 0)
 
 void sendByte(uint8_t code)
 {
+    // 1. Wait for idle state
     while (readState() != State::Idle)
         ;
 
+    // 2. Set pins to output mode and calculate port addresses [8us]
     pinMode(PIN_CLOCK, OUTPUT);
     pinMode(PIN_DATA, OUTPUT);
 
@@ -142,11 +144,15 @@ void sendByte(uint8_t code)
         break;
     }
 
-    // Send the start bit
-    outputLow(PIN_DATA);
-    outputLow(PIN_CLOCK);
+    // Clock output is optimized but data output is not optimized
+    // as some delay caused by the computation seems critical for the timing
+    auto outClock = portOutputRegister(digitalPinToPort(PIN_CLOCK));
+    auto maskClock = digitalPinToBitMask(PIN_CLOCK);
 
-    // ~ 20us for this computation is added for the delay before
+    // 3. Send the start bit [DELAY + 22 us]
+    outputLow(PIN_DATA);
+    *outClock &= ~maskClock;
+
     uint8_t bits[10];
     for (int i = 0; i < 8; ++i)
         bits[i] = (code >> i & 1) != 0 ? HIGH : LOW;
@@ -155,18 +161,21 @@ void sendByte(uint8_t code)
 
     delayMicroseconds(DELAY_SEND_CLOCK_LOW_START);
 
+    // 4. Send remaining bits [10 * DELAY + 30 us]
     for (int i = 0; i < 10; ++i)
     {
-        outputHigh(PIN_CLOCK);
+        *outClock |= maskClock;
 
         if (bits[i] == HIGH)
             outputHigh(PIN_DATA);
         else
             outputLow(PIN_DATA);
 
-        outputLow(PIN_CLOCK);
+        *outClock &= ~maskClock;
         delayMicroseconds(DELAY_SEND_CLOCK_LOW);
     }
+
+    // 5. Set pins to input mode [8us]
 
     pinMode(PIN_CLOCK, INPUT_PULLUP);
     pinMode(PIN_DATA, INPUT_PULLUP);
