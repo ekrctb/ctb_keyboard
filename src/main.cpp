@@ -11,38 +11,28 @@ enum class LogLevel
 
 constexpr LogLevel LOG_LEVEL = LogLevel::INFO;
 
-struct KeyConfig
-{
-    char const *name;
-    uint8_t pin;
-    uint8_t scanCode;
-};
-
 constexpr uint8_t DELAY_SEND_CLOCK_LOW_START = 30;
 constexpr uint8_t DELAY_SEND_CLOCK_LOW = 15;
 
 constexpr uint8_t DELAY_RECEIVE = 30;
 
-constexpr uint8_t PIN_DATA = 12, PIN_CLOCK = 13;
+constexpr uint8_t PIN_DATA = 8, PIN_CLOCK = 9;
 
-constexpr KeyConfig KEYS[] = {
-    KeyConfig{
-        "Left",
-        2,
-        0x75, // NumPad 8
-    },
-    KeyConfig{
-        "Right",
-        3,
-        0x7d, // NumPad 9
-    },
-    KeyConfig{
-        "Dash",
-        4,
-        0x24, // E
-    },
+constexpr uint8_t NUM_KEYS = 3;
+constexpr uint8_t KEYS_MASK = (2 << (NUM_KEYS - 1)) - 1;
+constexpr uint8_t PIN_KEY_START = 2;
+
+constexpr char const *KEY_NAMES[NUM_KEYS] = {
+    "Dash",
+    "Left",
+    "Right",
 };
-constexpr int NUM_KEYS = (int)(sizeof(KEYS) / sizeof(*KEYS));
+
+constexpr uint8_t KEY_SCAN_CODES[NUM_KEYS] = {
+    0x24, // E
+    0x75, // NumPad 8
+    0x7d, // NumPad 9
+};
 
 enum class State : uint8_t
 {
@@ -293,41 +283,58 @@ void executeHostCommand(uint8_t command)
     }
 }
 
+inline void pressKey(int i)
+{
+    sendByte(KEY_SCAN_CODES[i]);
+
+    logDebug(KEY_NAMES[i], 1);
+}
+
+inline void releaseKey(int i)
+{
+    sendByte(0xf0);
+    sendByte(KEY_SCAN_CODES[i]);
+
+    logDebug(KEY_NAMES[i], 0);
+}
+
+inline uint8_t readAllKeys()
+{
+    static_assert(PIN_KEY_START + NUM_KEYS <= 8, "Rewrite key input logic");
+    return ~PIND >> PIN_KEY_START & KEYS_MASK;
+}
+
 State scanKeysUntilStateChange()
 {
-    auto state = readState();
+    static uint8_t prev = 0;
+    static uint8_t resend = 0;
 
-    static bool previousKeyStates[NUM_KEYS] = {};
+    auto ps2State = readState();
 
-    for (; state == State::Idle; state = readState())
+    for (; ps2State == State::Idle; ps2State = readState())
     {
-        // ~ 16us for 3-key scan
-        for (int i = 0; i < NUM_KEYS; ++i)
+        uint8_t cur = readAllKeys();
+        uint8_t diff = (cur ^ prev) | resend;
+        if (diff == 0)
+            continue;
+        prev = cur;
+        resend ^= diff; // Send a key press/release twice for a reliability
+
+        for (int i = 0; i < NUM_KEYS; ++i, diff >>= 1, cur >>= 1)
         {
-            bool prev = previousKeyStates[i];
-            bool cur = readPin(KEYS[i].pin) == LOW;
-            if (prev != cur)
-            {
-                if (cur)
-                {
-                    sendByte(KEYS[i].scanCode);
-                    previousKeyStates[i] = true;
-                    logDebug(KEYS[i].name, 1);
-                    return state;
-                }
-                else
-                {
-                    sendByte(0xF0);
-                    sendByte(KEYS[i].scanCode);
-                    previousKeyStates[i] = false;
-                    logDebug(KEYS[i].name, 0);
-                    return state;
-                }
-            }
+            if (!(diff & 1))
+                continue;
+
+            if (cur & 1)
+                pressKey(i);
+            else
+                releaseKey(i);
         }
+
+        break;
     }
 
-    return state;
+    return ps2State;
 }
 
 void setup()
@@ -342,7 +349,7 @@ void setup()
     pinMode(PIN_CLOCK, INPUT_PULLUP);
 
     for (int i = 0; i < NUM_KEYS; ++i)
-        pinMode(KEYS[i].pin, INPUT_PULLUP);
+        pinMode(PIN_KEY_START + i, INPUT_PULLUP);
 }
 
 void loop()
