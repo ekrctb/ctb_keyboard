@@ -1,8 +1,6 @@
 #include <Arduino.h>
 #include "RingBuffer.hpp"
 
-// TODO: measure one key scan
-
 enum class LogLevel
 {
     NONE = 0,
@@ -26,6 +24,7 @@ constexpr uint8_t DELAY_SEND_CLOCK_LOW = 15;
 constexpr uint8_t DELAY_RECEIVE = 30;
 
 constexpr uint8_t PIN_DATA = 12, PIN_CLOCK = 13;
+
 constexpr KeyConfig KEYS[] = {
     KeyConfig{
         "Left",
@@ -131,18 +130,6 @@ void sendByte(uint8_t code)
     // 2. Set pins to output mode and calculate port addresses [8us]
     pinMode(PIN_CLOCK, OUTPUT);
     pinMode(PIN_DATA, OUTPUT);
-
-    switch (code)
-    {
-    case ACK:
-        delayMicroseconds(1000);
-        break;
-    case BAT_SUCCESS:
-        delayMicroseconds(10000);
-        break;
-    default:
-        break;
-    }
 
     // Clock output is optimized but data output is not optimized
     // as some delay caused by the computation seems critical for the timing
