@@ -6,7 +6,7 @@ class RingBuffer
     uint8_t next_read = 0;
 
 public:
-    void push(T x)
+    bool push(T x)
     {
         buf[next_write] = x;
         if (++next_write == CAPACITY)
@@ -14,27 +14,28 @@ public:
 
         if (next_read == next_write)
         {
-            Serial.println("Ring buffer capacity overflow");
-            abort();
+            if (next_write-- == 0)
+                next_write = CAPACITY - 1;
+            return false;
+        }
+        else
+        {
+            return true;
         }
     }
 
-    bool empty() const
-    {
-        return next_read == next_write;
-    }
-
-    T &pop()
+    bool pop(T *out)
     {
         if (next_read == next_write)
         {
-            Serial.println("Popped an empty ring buffer");
-            abort();
+            return false;
         }
-
-        T &x = buf[next_read];
-        if (++next_read == CAPACITY)
-            next_read = 0;
-        return x;
+        else
+        {
+            *out = buf[next_read];
+            if (++next_read == CAPACITY)
+                next_read = 0;
+            return true;
+        }
     }
 };

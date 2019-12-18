@@ -11,14 +11,35 @@ enum class LogLevel
 
 constexpr LogLevel LOG_LEVEL = LogLevel::INFO;
 
-constexpr uint8_t DELAY_SEND_CLOCK_LOW_START = 30;
+constexpr uint8_t DELAY_SEND_CLOCK_LOW_START = 40;
 constexpr uint8_t DELAY_SEND_CLOCK_LOW = 15;
+constexpr uint8_t DELAY_SEND_CLOCK_HIGH = 4;
 
 constexpr uint8_t DELAY_RECEIVE = 30;
 
-constexpr uint8_t PIN_DATA = 8, PIN_CLOCK = 9;
+constexpr uint8_t PIN_CLOCK = 8, PIN_DATA = 9;
+constexpr uint8_t IDLE = 0b11;
+constexpr uint8_t CAN_RECEIVE = 0b01;
 
-constexpr uint8_t NUM_KEYS = 3;
+constexpr uint8_t PINB_START = 8;
+constexpr uint8_t PINB_END = 13;
+inline uint8_t readClockData()
+{
+    static_assert(PINB_START <= PIN_CLOCK && PIN_DATA == PIN_CLOCK + 1 && PIN_DATA <= PINB_END, "Rewrite readClockData");
+    return PINB >> (PIN_CLOCK - PINB_START) & 0b11;
+}
+static_assert(PINB_START <= PIN_CLOCK && PIN_CLOCK <= PINB_END && PINB_START <= PIN_DATA && PIN_DATA <= PINB_END, "Rewrite CLOCK_DATA_MASK");
+constexpr uint8_t CLOCK_DATA_MASK = 1 << (PIN_CLOCK - PINB_START) | 1 << (PIN_DATA - PINB_START);
+inline void writeClockData(uint8_t clock, uint8_t data)
+{
+    PORTB = (PORTB & ~CLOCK_DATA_MASK) | clock << (PIN_CLOCK - PINB_START) | data << (PIN_DATA - PINB_START);
+}
+inline void modeClockData(uint8_t clock, uint8_t data)
+{
+    DDRB = (DDRB & ~CLOCK_DATA_MASK) | clock << (PIN_CLOCK - PINB_START) | data << (PIN_DATA - PINB_START);
+}
+
+constexpr uint8_t NUM_KEYS = 4;
 constexpr uint8_t KEYS_MASK = (2 << (NUM_KEYS - 1)) - 1;
 constexpr uint8_t PIN_KEY_START = 2;
 
@@ -26,49 +47,23 @@ constexpr char const *KEY_NAMES[NUM_KEYS] = {
     "Dash",
     "Left",
     "Right",
+    "Space",
 };
 
 constexpr uint8_t KEY_SCAN_CODES[NUM_KEYS] = {
     0x24, // E
     0x75, // NumPad 8
     0x7d, // NumPad 9
+    0x29, // Space
 };
 
-enum class State : uint8_t
+inline uint8_t readAllKeys()
 {
-    Idle,       // We can send data to the host
-    CanReceive, // We should receive data from the host
-    Inhibited,  // We should wait until host is ready
-};
+    return ~PIND >> PIN_KEY_START & KEYS_MASK; // pin 2, 3, 4, 5
+}
 
 constexpr uint8_t ACK = 0xFA;
 constexpr uint8_t BAT_SUCCESS = 0xAA;
-
-inline int readPin(uint8_t pin)
-{
-    return (*portInputRegister(digitalPinToPort(pin)) & digitalPinToBitMask(pin)) != 0 ? HIGH : LOW;
-}
-
-inline void outputHigh(uint8_t pin)
-{
-    *portOutputRegister(digitalPinToPort(pin)) |= digitalPinToBitMask(pin);
-}
-
-inline void outputLow(uint8_t pin)
-{
-    *portOutputRegister(digitalPinToPort(pin)) &= ~digitalPinToBitMask(pin);
-}
-
-inline State readState()
-{
-    auto data = readPin(PIN_DATA);
-    auto clock = readPin(PIN_CLOCK);
-    if (data == HIGH && clock == HIGH)
-        return State::Idle;
-    if (data == LOW && clock == HIGH)
-        return State::CanReceive;
-    return State::Inhibited;
-}
 
 bool oddParity(uint8_t x)
 {
@@ -86,11 +81,14 @@ RingBuffer<LogEntry, 8> logEntries;
 
 void logInner(const char *message, uint8_t byte)
 {
-    logEntries.push(LogEntry{
-        micros(),
-        message,
-        byte,
-    });
+    if (!logEntries.push(LogEntry{
+            micros(),
+            message,
+            byte,
+        }))
+    {
+        Serial.println("Too many logs");
+    }
 }
 
 inline void logDebug(const char *message, uint8_t byte = 0)
@@ -114,22 +112,18 @@ inline void logNotice(const char *message, uint8_t byte = 0)
 void sendByte(uint8_t code)
 {
     // 1. Wait for idle state
-    while (readState() != State::Idle)
+    while (readClockData() != IDLE)
         ;
 
-    // 2. Set pins to output mode and calculate port addresses [8us]
-    pinMode(PIN_CLOCK, OUTPUT);
-    pinMode(PIN_DATA, OUTPUT);
+    // 2. Set pins to output mode and calculate port addresses
+    modeClockData(OUTPUT, OUTPUT);
 
-    // Clock output is optimized but data output is not optimized
-    // as some delay caused by the computation seems critical for the timing
-    auto outClock = portOutputRegister(digitalPinToPort(PIN_CLOCK));
-    auto maskClock = digitalPinToBitMask(PIN_CLOCK);
+    // 3. Send the start bit
+    writeClockData(HIGH, LOW);
+    delayMicroseconds(DELAY_SEND_CLOCK_HIGH);
+    writeClockData(LOW, LOW);
 
-    // 3. Send the start bit [DELAY + 22 us]
-    outputLow(PIN_DATA);
-    *outClock &= ~maskClock;
-
+    // The computation here is added to the delay of DELAY_SEND_CLOCK_LOW_START
     uint8_t bits[10];
     for (int i = 0; i < 8; ++i)
         bits[i] = (code >> i & 1) != 0 ? HIGH : LOW;
@@ -138,42 +132,37 @@ void sendByte(uint8_t code)
 
     delayMicroseconds(DELAY_SEND_CLOCK_LOW_START);
 
-    // 4. Send remaining bits [10 * DELAY + 30 us]
+    // 4. Send remaining bits
     for (int i = 0; i < 10; ++i)
     {
-        *outClock |= maskClock;
-
-        if (bits[i] == HIGH)
-            outputHigh(PIN_DATA);
-        else
-            outputLow(PIN_DATA);
-
-        *outClock &= ~maskClock;
+        auto bit = bits[i];
+        writeClockData(HIGH, bit);
+        delayMicroseconds(DELAY_SEND_CLOCK_HIGH);
+        writeClockData(LOW, bit);
         delayMicroseconds(DELAY_SEND_CLOCK_LOW);
     }
 
-    // 5. Set pins to input mode [8us]
-
-    pinMode(PIN_CLOCK, INPUT_PULLUP);
-    pinMode(PIN_DATA, INPUT_PULLUP);
+    // 5. Set pins to input pull-up mode
+    writeClockData(HIGH, HIGH);
+    modeClockData(INPUT, INPUT);
 
     logDebug("Sent byte", code);
 }
 
 bool receiveByte(uint8_t *outCommand)
 {
-    while (readState() != State::CanReceive)
+    while (readClockData() != CAN_RECEIVE)
         ;
-    pinMode(PIN_CLOCK, OUTPUT);
+    modeClockData(OUTPUT, INPUT);
 
     uint8_t bits[10];
     for (int i = 0; i < 10; ++i)
     {
-        outputLow(PIN_CLOCK);
+        writeClockData(LOW, HIGH);
         delayMicroseconds(DELAY_RECEIVE);
 
-        bits[i] = readPin(PIN_DATA);
-        outputHigh(PIN_CLOCK);
+        bits[i] = readClockData() >> 1;
+        writeClockData(HIGH, HIGH);
         delayMicroseconds(DELAY_RECEIVE);
     }
 
@@ -181,23 +170,20 @@ bool receiveByte(uint8_t *outCommand)
     for (int i = 0; i < 8; ++i)
         command |= bits[i] == HIGH ? 1 << i : 0;
 
-    //The device should bring the Data line low and generate one clock pulse
-
-    pinMode(PIN_DATA, OUTPUT);
-    outputLow(PIN_DATA);
+    modeClockData(OUTPUT, OUTPUT);
+    writeClockData(HIGH, LOW);
     delayMicroseconds(DELAY_RECEIVE);
 
-    outputLow(PIN_CLOCK);
+    writeClockData(LOW, LOW);
     delayMicroseconds(DELAY_RECEIVE);
 
-    outputHigh(PIN_CLOCK);
+    writeClockData(HIGH, LOW);
     delayMicroseconds(DELAY_RECEIVE);
 
-    outputHigh(PIN_DATA);
+    writeClockData(HIGH, HIGH);
     delayMicroseconds(DELAY_RECEIVE);
 
-    pinMode(PIN_DATA, INPUT_PULLUP);
-    pinMode(PIN_CLOCK, INPUT_PULLUP);
+    modeClockData(INPUT, INPUT);
 
     *outCommand = command;
 
@@ -283,58 +269,48 @@ void executeHostCommand(uint8_t command)
     }
 }
 
+RingBuffer<uint8_t, 16> scanCodeBuffer;
+
 inline void pressKey(int i)
 {
-    sendByte(KEY_SCAN_CODES[i]);
+    scanCodeBuffer.push(KEY_SCAN_CODES[i]);
 
     logDebug(KEY_NAMES[i], 1);
 }
 
 inline void releaseKey(int i)
 {
-    sendByte(0xf0);
-    sendByte(KEY_SCAN_CODES[i]);
+    scanCodeBuffer.push(0xf0);
+    scanCodeBuffer.push(KEY_SCAN_CODES[i]);
 
     logDebug(KEY_NAMES[i], 0);
 }
 
-inline uint8_t readAllKeys()
+void sendKeys(uint8_t diff, uint8_t pressed)
 {
-    static_assert(PIN_KEY_START + NUM_KEYS <= 8, "Rewrite key input logic");
-    return ~PIND >> PIN_KEY_START & KEYS_MASK;
-}
-
-State scanKeysUntilStateChange()
-{
-    static uint8_t prev = 0;
-    static uint8_t resend = 0;
-
-    auto ps2State = readState();
-
-    for (; ps2State == State::Idle; ps2State = readState())
+    for (int i = 0; i < NUM_KEYS; ++i, diff >>= 1, pressed >>= 1)
     {
-        uint8_t cur = readAllKeys();
-        uint8_t diff = (cur ^ prev) | resend;
-        if (diff == 0)
-            continue;
-        prev = cur;
-        resend ^= diff; // Send a key press/release twice for a reliability
-
-        for (int i = 0; i < NUM_KEYS; ++i, diff >>= 1, cur >>= 1)
+        if (diff & 1)
         {
-            if (!(diff & 1))
-                continue;
-
-            if (cur & 1)
+            if (pressed & 1)
                 pressKey(i);
             else
                 releaseKey(i);
         }
-
-        break;
     }
+}
 
-    return ps2State;
+void scanKeys()
+{
+    static uint8_t prev = 0;
+
+    uint8_t cur = readAllKeys();
+    uint8_t diff = (cur ^ prev);
+    if (diff != 0)
+    {
+        prev = cur;
+        sendKeys(diff, cur);
+    }
 }
 
 void setup()
@@ -354,26 +330,39 @@ void setup()
 
 void loop()
 {
-    auto state = scanKeysUntilStateChange();
-
-    if (state == State::CanReceive)
+    switch (readClockData())
+    {
+    case CAN_RECEIVE:
     {
         uint8_t command;
         if (receiveByte(&command))
             executeHostCommand(command);
+        break;
+    }
+    case IDLE:
+    {
+        scanKeys();
+        uint8_t code;
+        while (readClockData() == IDLE && scanCodeBuffer.pop(&code))
+            sendByte(code);
+        break;
+    }
     }
 
-    while (!logEntries.empty())
+    if (LOG_LEVEL > LogLevel::NONE)
     {
-        LogEntry &entry = logEntries.pop();
-        Serial.print(entry.time);
-        Serial.print(" ");
-        Serial.print(entry.message);
-        if (entry.byte != 0)
+        LogEntry entry;
+        while (logEntries.pop(&entry))
         {
+            Serial.print(entry.time);
             Serial.print(" ");
-            Serial.print(entry.byte, HEX);
+            Serial.print(entry.message);
+            if (entry.byte != 0)
+            {
+                Serial.print(" ");
+                Serial.print(entry.byte, HEX);
+            }
+            Serial.println();
         }
-        Serial.println();
     }
 }
