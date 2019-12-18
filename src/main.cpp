@@ -11,9 +11,19 @@ enum class LogLevel
 
 constexpr LogLevel LOG_LEVEL = LogLevel::INFO;
 
-constexpr uint8_t DELAY_SEND_CLOCK_LOW_START = 40;
-constexpr uint8_t DELAY_SEND_CLOCK_LOW = 15;
-constexpr uint8_t DELAY_SEND_CLOCK_HIGH = 4;
+// A workaround for skipped key press/release
+constexpr bool SEND_KEY_TWICE = false;
+// Send many key codes to see if keys are skipped
+constexpr bool DEBUG_STRESS_TEST = false;
+// Use one-byte "Set 1" representation of the release codes.
+// Depending on the (undocumented?/undefined?) behavior of a 8042 controller
+// for not translating such bytes.
+constexpr bool USE_UNTRANSLATED_SET1_CODE_FOR_RELEASE = true;
+
+constexpr uint8_t DELAY_SEND_RISING_TO_DATA = 5;  //5;
+constexpr uint8_t DELAY_SEND_DATA_TO_FALLING = 5; //5;
+constexpr uint8_t DELAY_SEND_LOW = 12;            //12;
+constexpr uint8_t DELAY_SEND_LOW_START_BIT = 30;  //30;
 
 constexpr uint8_t DELAY_RECEIVE = 30;
 
@@ -32,16 +42,17 @@ static_assert(PINB_START <= PIN_CLOCK && PIN_CLOCK <= PINB_END && PINB_START <= 
 constexpr uint8_t CLOCK_DATA_MASK = 1 << (PIN_CLOCK - PINB_START) | 1 << (PIN_DATA - PINB_START);
 inline void writeClockData(uint8_t clock, uint8_t data)
 {
-    PORTB = (PORTB & ~CLOCK_DATA_MASK) | clock << (PIN_CLOCK - PINB_START) | data << (PIN_DATA - PINB_START);
+    PORTB = clock << (PIN_CLOCK - PINB_START) | data << (PIN_DATA - PINB_START);
 }
 inline void modeClockData(uint8_t clock, uint8_t data)
 {
-    DDRB = (DDRB & ~CLOCK_DATA_MASK) | clock << (PIN_CLOCK - PINB_START) | data << (PIN_DATA - PINB_START);
+    DDRB = clock << (PIN_CLOCK - PINB_START) | data << (PIN_DATA - PINB_START);
 }
 
 constexpr uint8_t NUM_KEYS = 4;
 constexpr uint8_t KEYS_MASK = (2 << (NUM_KEYS - 1)) - 1;
 constexpr uint8_t PIN_KEY_START = 2;
+constexpr uint8_t KEY_MINIMUM_MILLISECONDS = 10;
 
 constexpr char const *KEY_NAMES[NUM_KEYS] = {
     "Dash",
@@ -55,6 +66,13 @@ constexpr uint8_t KEY_SCAN_CODES[NUM_KEYS] = {
     0x75, // NumPad 8
     0x7d, // NumPad 9
     0x29, // Space
+};
+
+constexpr uint8_t KEY_SET1_RELEASE_CODES[NUM_KEYS] = {
+    0x92, // E
+    0xc8, // NumPad 8
+    0xc9, // NumPad 9
+    0xb9, // Space
 };
 
 inline uint8_t readAllKeys()
@@ -111,39 +129,48 @@ inline void logNotice(const char *message, uint8_t byte = 0)
 
 void sendByte(uint8_t code)
 {
+    uint8_t bits[10];
+    auto computeBits = [code, &bits]() {
+        for (int i = 0; i < 8; ++i)
+            bits[i] = (code >> i & 1) != 0 ? HIGH : LOW;
+        bits[8] = oddParity(code) ? HIGH : LOW;
+        bits[9] = HIGH;
+    };
+
     // 1. Wait for idle state
     while (readClockData() != IDLE)
         ;
 
-    // 2. Set pins to output mode and calculate port addresses
+    // 2. Set pins to output mode
     modeClockData(OUTPUT, OUTPUT);
 
     // 3. Send the start bit
     writeClockData(HIGH, LOW);
-    delayMicroseconds(DELAY_SEND_CLOCK_HIGH);
+    delayMicroseconds(DELAY_SEND_DATA_TO_FALLING);
+
     writeClockData(LOW, LOW);
+    computeBits(); // Compute this during the waiting time of clock low
+    delayMicroseconds(DELAY_SEND_LOW_START_BIT);
 
-    // The computation here is added to the delay of DELAY_SEND_CLOCK_LOW_START
-    uint8_t bits[10];
-    for (int i = 0; i < 8; ++i)
-        bits[i] = (code >> i & 1) != 0 ? HIGH : LOW;
-    bits[8] = oddParity(code) ? HIGH : LOW;
-    bits[9] = HIGH;
+    writeClockData(HIGH, LOW);
+    delayMicroseconds(DELAY_SEND_RISING_TO_DATA);
 
-    delayMicroseconds(DELAY_SEND_CLOCK_LOW_START);
-
-    // 4. Send remaining bits
+    // 4. Send the remaining bits
     for (int i = 0; i < 10; ++i)
     {
-        auto bit = bits[i];
+        uint8_t bit = bits[i];
+
         writeClockData(HIGH, bit);
-        delayMicroseconds(DELAY_SEND_CLOCK_HIGH);
+        delayMicroseconds(DELAY_SEND_DATA_TO_FALLING);
+
         writeClockData(LOW, bit);
-        delayMicroseconds(DELAY_SEND_CLOCK_LOW);
+        delayMicroseconds(DELAY_SEND_LOW);
+
+        writeClockData(HIGH, bit);
+        delayMicroseconds(DELAY_SEND_RISING_TO_DATA);
     }
 
-    // 5. Set pins to input pull-up mode
-    writeClockData(HIGH, HIGH);
+    // 5. Set pins to input mode
     modeClockData(INPUT, INPUT);
 
     logDebug("Sent byte", code);
@@ -239,6 +266,7 @@ void executeHostCommand(uint8_t command)
         uint8_t typematic;
         if (!receiveByte(&typematic))
             break;
+        sendByte(ACK);
         logInfo("Typematic", typematic);
         // Currently ignored
         // Several typematic commands are sent at the startup probably to determine which typematic setting is supported.
@@ -259,6 +287,7 @@ void executeHostCommand(uint8_t command)
         uint8_t led;
         if (!receiveByte(&led))
             break;
+        sendByte(ACK);
         logInfo("LED", led);
         break;
     }
@@ -269,47 +298,192 @@ void executeHostCommand(uint8_t command)
     }
 }
 
-RingBuffer<uint8_t, 16> scanCodeBuffer;
+uint32_t timestamps[NUM_KEYS];
+uint8_t currentKeyState = 0;
+uint8_t sendingKeys = 0;
 
-inline void pressKey(int i)
+inline bool checkTimestamp(int i)
 {
-    scanCodeBuffer.push(KEY_SCAN_CODES[i]);
+    auto time = millis();
+    if (time - timestamps[i] < KEY_MINIMUM_MILLISECONDS)
+    {
+        logDebug("Bounced key state change ignored");
+        return false;
+    }
+    else
+    {
+        timestamps[i] = time;
+        return true;
+    }
+}
+
+inline void onKeyPressed(int i)
+{
+    if (!checkTimestamp(i))
+        return;
+
+    sendingKeys |= 1 << i;
+    currentKeyState |= 1 << i;
 
     logDebug(KEY_NAMES[i], 1);
 }
 
-inline void releaseKey(int i)
+inline void onKeyReleased(int i)
 {
-    scanCodeBuffer.push(0xf0);
-    scanCodeBuffer.push(KEY_SCAN_CODES[i]);
+    if (!checkTimestamp(i))
+        return;
+
+    sendingKeys |= 1 << i;
+    currentKeyState &= ~(1 << i);
 
     logDebug(KEY_NAMES[i], 0);
 }
 
-void sendKeys(uint8_t diff, uint8_t pressed)
+void processKeyStateChanges(uint8_t diff, uint8_t pressed)
 {
     for (int i = 0; i < NUM_KEYS; ++i, diff >>= 1, pressed >>= 1)
     {
         if (diff & 1)
         {
             if (pressed & 1)
-                pressKey(i);
+                onKeyPressed(i);
             else
-                releaseKey(i);
+                onKeyReleased(i);
         }
     }
 }
 
 void scanKeys()
 {
-    static uint8_t prev = 0;
-
     uint8_t cur = readAllKeys();
-    uint8_t diff = (cur ^ prev);
+    uint8_t diff = (cur ^ currentKeyState);
     if (diff != 0)
+        processKeyStateChanges(diff, cur);
+}
+
+bool sendScanCode()
+{
+    if (sendingKeys == 0)
+        return false;
+
+    static uint8_t lastIndex = NUM_KEYS - 1;
+    uint8_t i = lastIndex + 1;
+    uint8_t mask;
+    while (1)
     {
-        prev = cur;
-        sendKeys(diff, cur);
+        if (i == NUM_KEYS)
+            i = 0;
+        mask = 1 << i;
+        if (sendingKeys & mask)
+            break;
+        ++i;
+    }
+    lastIndex = i;
+
+    uint8_t code0, code1 = 0;
+    if ((currentKeyState & mask) != 0)
+        code0 = KEY_SCAN_CODES[i];
+    else if (USE_UNTRANSLATED_SET1_CODE_FOR_RELEASE)
+        code0 = KEY_SET1_RELEASE_CODES[i];
+    else
+    {
+        code0 = 0xf0;
+        code1 = KEY_SCAN_CODES[i];
+    }
+    sendByte(code0);
+    if (code1 != 0)
+        sendByte(code1);
+
+    if (SEND_KEY_TWICE)
+    {
+        static uint8_t sentOnce = 0;
+        if (sentOnce & mask)
+        {
+            sentOnce &= ~mask;
+            sendingKeys &= ~mask;
+        }
+        else
+        {
+            sentOnce |= mask;
+        }
+    }
+    else
+    {
+        sendingKeys &= ~mask;
+    }
+
+    return true;
+}
+
+void debugStressTest()
+{
+    const uint8_t CODES[] = {
+        0x45,
+        0x16,
+        0x1e,
+        0x26,
+        0x25,
+        0x2e,
+        0x36,
+        0x3d,
+        0x3e,
+        0x46,
+        0x1c,
+        0x32,
+        0x21,
+        0x23,
+        0x24,
+        0x2b,
+        0x34,
+        0x33,
+        0x43,
+        0x3b,
+        0x42,
+        0x4b,
+        0x3a,
+        0x31,
+        0x44,
+        0x4d,
+        0x15,
+        0x2d,
+        0x1b,
+        0x2c,
+        0x3c,
+        0x2a,
+        0x1d,
+        0x22,
+        0x35,
+        0x1a,
+        0x5a,
+    };
+
+    auto keys = readAllKeys();
+    if ((keys & 0b10) == 0)
+        return;
+
+    static uint8_t nextIndex = 0;
+    uint8_t i = nextIndex;
+
+    if (keys & 0b100)
+        sendByte(0xf0);
+    sendByte(CODES[i]);
+
+    if (random() >= RANDOM_MAX / 2)
+    {
+        delayMicroseconds(1000 + random() % 1000);
+    }
+
+    if (++nextIndex == sizeof(CODES))
+    {
+        nextIndex = 0;
+        if (keys & 0b001)
+        {
+            for (auto code : CODES)
+            {
+                sendByte(0xf0);
+                sendByte(code);
+            }
+        }
     }
 }
 
@@ -330,6 +504,8 @@ void setup()
 
 void loop()
 {
+    scanKeys();
+
     switch (readClockData())
     {
     case CAN_RECEIVE:
@@ -341,10 +517,16 @@ void loop()
     }
     case IDLE:
     {
-        scanKeys();
-        uint8_t code;
-        while (readClockData() == IDLE && scanCodeBuffer.pop(&code))
-            sendByte(code);
+        if (DEBUG_STRESS_TEST)
+        {
+            debugStressTest();
+            break;
+        }
+
+        if (sendScanCode())
+        {
+            // ~ 550us until become idle again
+        }
         break;
     }
     }
