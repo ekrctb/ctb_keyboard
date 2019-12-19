@@ -20,10 +20,10 @@ constexpr bool DEBUG_STRESS_TEST = false;
 // for not translating such bytes.
 constexpr bool USE_UNTRANSLATED_SET1_CODE_FOR_RELEASE = true;
 
-constexpr uint8_t DELAY_SEND_RISING_TO_DATA = 5;  //5;
-constexpr uint8_t DELAY_SEND_DATA_TO_FALLING = 5; //5;
-constexpr uint8_t DELAY_SEND_LOW = 12;            //12;
-constexpr uint8_t DELAY_SEND_LOW_START_BIT = 30;  //30;
+constexpr uint8_t DELAY_SEND_RISING_TO_DATA = 5;
+constexpr uint8_t DELAY_SEND_DATA_TO_FALLING = 5;
+constexpr uint8_t DELAY_SEND_LOW = 12;
+constexpr uint8_t DELAY_SEND_LOW_START_BIT = 30;
 
 constexpr uint8_t DELAY_RECEIVE = 30;
 
@@ -492,7 +492,22 @@ void setup()
     if (LOG_LEVEL > LogLevel::NONE)
     {
         Serial.begin(9600);
-        Serial.println("hello");
+        Serial.println("ctb_keyboard");
+        Serial.println("Built at " __DATE__ " " __TIME__);
+        Serial.println();
+
+#define PRINT_VAR(var) Serial.print(#var " = "), Serial.println(var)
+        PRINT_VAR((int)LOG_LEVEL);
+        PRINT_VAR(SEND_KEY_TWICE);
+        PRINT_VAR(DEBUG_STRESS_TEST);
+        PRINT_VAR(USE_UNTRANSLATED_SET1_CODE_FOR_RELEASE);
+        Serial.println();
+        PRINT_VAR(PIN_CLOCK);
+        PRINT_VAR(PIN_DATA);
+        PRINT_VAR(PIN_KEY_START);
+        PRINT_VAR(NUM_KEYS);
+        Serial.println();
+#undef PRINT_VAR
     }
 
     pinMode(PIN_DATA, INPUT_PULLUP);
