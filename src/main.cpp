@@ -49,35 +49,34 @@ inline void modeClockData(uint8_t clock, uint8_t data)
     DDRB = clock << (PIN_CLOCK - PINB_START) | data << (PIN_DATA - PINB_START);
 }
 
-constexpr uint8_t NUM_KEYS = 4;
+constexpr uint8_t NUM_KEYS = 3;
 constexpr uint8_t KEYS_MASK = (2 << (NUM_KEYS - 1)) - 1;
 constexpr uint8_t PIN_KEY_START = 2;
 constexpr uint8_t KEY_MINIMUM_MILLISECONDS = 10;
+constexpr bool PIN_KEY_PULLUP = true;
+constexpr bool PIN_KEY_COMPLEMENT = true;
 
 constexpr char const *KEY_NAMES[NUM_KEYS] = {
     "Dash",
     "Left",
     "Right",
-    "Space",
 };
 
 constexpr uint8_t KEY_SCAN_CODES[NUM_KEYS] = {
     0x24, // E
     0x75, // NumPad 8
     0x7d, // NumPad 9
-    0x29, // Space
 };
 
 constexpr uint8_t KEY_SET1_RELEASE_CODES[NUM_KEYS] = {
     0x92, // E
     0xc8, // NumPad 8
     0xc9, // NumPad 9
-    0xb9, // Space
 };
 
 inline uint8_t readAllKeys()
 {
-    return ~PIND >> PIN_KEY_START & KEYS_MASK; // pin 2, 3, 4, 5
+    return (PIN_KEY_COMPLEMENT ? ~PIND : PIND) >> PIN_KEY_START & KEYS_MASK;
 }
 
 constexpr uint8_t ACK = 0xFA;
@@ -307,7 +306,7 @@ inline bool checkTimestamp(int i)
     auto time = millis();
     if (time - timestamps[i] < KEY_MINIMUM_MILLISECONDS)
     {
-        logDebug("Bounced key state change ignored");
+        logDebug("Bounced key state change ignored", i);
         return false;
     }
     else
@@ -491,7 +490,7 @@ void setup()
 {
     if (LOG_LEVEL > LogLevel::NONE)
     {
-        Serial.begin(9600);
+        Serial.begin(1000000);
         Serial.println("ctb_keyboard");
         Serial.println("Built at " __DATE__ " " __TIME__);
         Serial.println();
@@ -514,7 +513,10 @@ void setup()
     pinMode(PIN_CLOCK, INPUT_PULLUP);
 
     for (int i = 0; i < NUM_KEYS; ++i)
-        pinMode(PIN_KEY_START + i, INPUT_PULLUP);
+        pinMode(PIN_KEY_START + i, PIN_KEY_PULLUP ? INPUT_PULLUP : INPUT);
+
+    pinMode(LED_BUILTIN, OUTPUT);
+    digitalWrite(LED_BUILTIN, LOW);
 }
 
 void loop()
