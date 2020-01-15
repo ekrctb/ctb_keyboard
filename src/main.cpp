@@ -20,7 +20,7 @@ constexpr bool DEBUG_STRESS_TEST = false;
 // for not translating such bytes.
 constexpr bool USE_UNTRANSLATED_SET1_CODE_FOR_RELEASE = true;
 
-constexpr uint8_t DELAY_SEND_RISING_TO_DATA = 5;
+constexpr uint8_t DELAY_SEND_STATE_CHECK = 4;
 constexpr uint8_t DELAY_SEND_DATA_TO_FALLING = 5;
 constexpr uint8_t DELAY_SEND_LOW = 12;
 constexpr uint8_t DELAY_SEND_LOW_START_BIT = 30;
@@ -126,7 +126,7 @@ inline void logNotice(const char *message, uint8_t byte = 0)
         logInner(message, byte);
 }
 
-void sendByte(uint8_t code)
+bool trySendByte(uint8_t code)
 {
     uint8_t bits[10];
     auto computeBits = [code, &bits]() {
@@ -136,9 +136,7 @@ void sendByte(uint8_t code)
         bits[9] = HIGH;
     };
 
-    // 1. Wait for idle state
-    while (readClockData() != IDLE)
-        ;
+    // 1. Assume it is an idle state
 
     // 2. Set pins to output mode
     modeClockData(OUTPUT, OUTPUT);
@@ -152,11 +150,24 @@ void sendByte(uint8_t code)
     delayMicroseconds(DELAY_SEND_LOW_START_BIT);
 
     writeClockData(HIGH, LOW);
-    delayMicroseconds(DELAY_SEND_RISING_TO_DATA);
+    modeClockData(INPUT, OUTPUT);
+    delayMicroseconds(DELAY_SEND_STATE_CHECK);
 
     // 4. Send the remaining bits
     for (int i = 0; i < 10; ++i)
     {
+        // 5. If the communication is inhibited before sending 11th clock pulse,
+        //    abort the current communication.
+        if ((readClockData() & 1) == 0)
+        {
+            modeClockData(INPUT, INPUT);
+            writeClockData(HIGH, HIGH);
+            if (DEBUG_STRESS_TEST)
+                Serial.print('i');
+            return false;
+        }
+        modeClockData(OUTPUT, OUTPUT);
+
         uint8_t bit = bits[i];
 
         writeClockData(HIGH, bit);
@@ -166,13 +177,30 @@ void sendByte(uint8_t code)
         delayMicroseconds(DELAY_SEND_LOW);
 
         writeClockData(HIGH, bit);
-        delayMicroseconds(DELAY_SEND_RISING_TO_DATA);
+        modeClockData(INPUT, OUTPUT);
+        delayMicroseconds(DELAY_SEND_STATE_CHECK);
     }
 
-    // 5. Set pins to input mode
+    // 6. Set pins to input mode
     modeClockData(INPUT, INPUT);
 
     logDebug("Sent byte", code);
+    return true;
+}
+
+// Loop until the byte chunk is sent completely
+inline void sendByteChunk(uint8_t code0, uint8_t code1 = 0)
+{
+    while (1)
+    {
+        while (readClockData() != IDLE)
+            ;
+        if (!trySendByte(code0))
+            continue;
+        if (code1 != 0 && !trySendByte(code1))
+            continue;
+        break;
+    }
 }
 
 bool receiveByte(uint8_t *outCommand)
@@ -236,36 +264,36 @@ void executeHostCommand(uint8_t command)
     {
     // 0xFF (Reset) - Respond with "ack" (0xFA) then BAT (Basic Assurance Test) is performed. States are resetted.
     case 0xff:
-        sendByte(ACK);
-        sendByte(BAT_SUCCESS);
+        sendByteChunk(ACK);
+        sendByteChunk(BAT_SUCCESS);
         logInfo("Reset completed");
         break;
 
     // 0xFE (Resend) - Resend the last sent byte
     // case 0xfe:
-    //     sendByte(lastSentByte);
+    //     sendByteChunk(lastSentByte);
     //     break;
 
     // 0xF4 (Enable) - Enable sending keys
     case 0xf4:
-        sendByte(ACK);
+        sendByteChunk(ACK);
         // Currently ignored
         break;
 
     // 0xF5 (Disable) - Disable sending keys until enabled
     case 0xf5:
-        sendByte(ACK);
+        sendByteChunk(ACK);
         // Currently ignored
         break;
 
     // 0xF3 (Set Typematic Rate/Delay) - Receive an argument
     case 0xf3:
     {
-        sendByte(ACK);
+        sendByteChunk(ACK);
         uint8_t typematic;
         if (!receiveByte(&typematic))
             break;
-        sendByte(ACK);
+        sendByteChunk(ACK);
         logInfo("Typematic", typematic);
         // Currently ignored
         // Several typematic commands are sent at the startup probably to determine which typematic setting is supported.
@@ -274,19 +302,18 @@ void executeHostCommand(uint8_t command)
 
     // 0xF2 (Read ID) - Send 0xAB, 0x83
     case 0xf2:
-        sendByte(ACK);
-        sendByte(0xAB);
-        sendByte(0x83);
+        sendByteChunk(ACK);
+        sendByteChunk(0xAB, 0x83);
         break;
 
     // 0xED (Set LED State) - Receive an argument
     case 0xed:
     {
-        sendByte(ACK);
+        sendByteChunk(ACK);
         uint8_t led;
         if (!receiveByte(&led))
             break;
-        sendByte(ACK);
+        sendByteChunk(ACK);
         logInfo("LED", led);
         break;
     }
@@ -389,9 +416,8 @@ bool sendScanCode()
         code0 = 0xf0;
         code1 = KEY_SCAN_CODES[i];
     }
-    sendByte(code0);
-    if (code1 != 0)
-        sendByte(code1);
+
+    sendByteChunk(code0, code1);
 
     if (SEND_KEY_TWICE)
     {
@@ -464,8 +490,13 @@ void debugStressTest()
     uint8_t i = nextIndex;
 
     if (keys & 0b100)
-        sendByte(0xf0);
-    sendByte(CODES[i]);
+    {
+        sendByteChunk(0xf0, CODES[i]);
+    }
+    else
+    {
+        sendByteChunk(CODES[i]);
+    }
 
     if (random() >= RANDOM_MAX / 2)
     {
@@ -479,8 +510,7 @@ void debugStressTest()
         {
             for (auto code : CODES)
             {
-                sendByte(0xf0);
-                sendByte(code);
+                sendByteChunk(0xf0, code);
             }
         }
     }
