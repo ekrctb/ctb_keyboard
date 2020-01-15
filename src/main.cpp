@@ -11,8 +11,6 @@ enum class LogLevel
 
 constexpr LogLevel LOG_LEVEL = LogLevel::INFO;
 
-// A workaround for skipped key press/release
-constexpr bool SEND_KEY_TWICE = false;
 // Send many key codes to see if keys are skipped
 constexpr bool DEBUG_STRESS_TEST = false;
 // Use one-byte "Set 1" representation of the release codes.
@@ -406,36 +404,14 @@ bool sendScanCode()
     }
     lastIndex = i;
 
-    uint8_t code0, code1 = 0;
     if ((currentKeyState & mask) != 0)
-        code0 = KEY_SCAN_CODES[i];
+        sendByteChunk(KEY_SCAN_CODES[i]);
     else if (USE_UNTRANSLATED_SET1_CODE_FOR_RELEASE)
-        code0 = KEY_SET1_RELEASE_CODES[i];
+        sendByteChunk(KEY_SET1_RELEASE_CODES[i]);
     else
-    {
-        code0 = 0xf0;
-        code1 = KEY_SCAN_CODES[i];
-    }
+        sendByteChunk(0xf0, KEY_SCAN_CODES[i]);
 
-    sendByteChunk(code0, code1);
-
-    if (SEND_KEY_TWICE)
-    {
-        static uint8_t sentOnce = 0;
-        if (sentOnce & mask)
-        {
-            sentOnce &= ~mask;
-            sendingKeys &= ~mask;
-        }
-        else
-        {
-            sentOnce |= mask;
-        }
-    }
-    else
-    {
-        sendingKeys &= ~mask;
-    }
+    sendingKeys &= ~mask;
 
     return true;
 }
@@ -527,7 +503,6 @@ void setup()
 
 #define PRINT_VAR(var) Serial.print(#var " = "), Serial.println(var)
         PRINT_VAR((int)LOG_LEVEL);
-        PRINT_VAR(SEND_KEY_TWICE);
         PRINT_VAR(DEBUG_STRESS_TEST);
         PRINT_VAR(USE_UNTRANSLATED_SET1_CODE_FOR_RELEASE);
         Serial.println();
