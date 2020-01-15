@@ -162,6 +162,7 @@ bool trySendByte(uint8_t code)
             writeClockData(HIGH, HIGH);
             if (DEBUG_STRESS_TEST)
                 Serial.print('i');
+            logDebug("Inhibited during send", code);
             return false;
         }
         modeClockData(OUTPUT, OUTPUT);
@@ -195,8 +196,13 @@ inline void sendByteChunk(uint8_t code0, uint8_t code1 = 0)
             ;
         if (!trySendByte(code0))
             continue;
-        if (code1 != 0 && !trySendByte(code1))
-            continue;
+        if (code1 != 0)
+        {
+            while (readClockData() != IDLE)
+                ;
+            if (!trySendByte(code1))
+                continue;
+        }
         break;
     }
 }
