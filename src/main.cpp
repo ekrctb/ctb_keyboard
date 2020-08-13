@@ -18,8 +18,8 @@ constexpr bool DEBUG_STRESS_TEST = false;
 // for not translating such bytes.
 constexpr bool USE_UNTRANSLATED_SET1_CODE_FOR_RELEASE = true;
 
-constexpr uint8_t DELAY_SEND_STATE_CHECK = 4;
-constexpr uint8_t DELAY_SEND_DATA_TO_FALLING = 5;
+constexpr uint8_t DELAY_SEND_STATE_CHECK = 5;
+constexpr uint8_t DELAY_SEND_DATA_TO_FALLING = 6;
 constexpr uint8_t DELAY_SEND_LOW = 12;
 constexpr uint8_t DELAY_SEND_LOW_START_BIT = 30;
 
